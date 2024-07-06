@@ -48,16 +48,19 @@ def banner():
                `'\n\n""", "blue"))
 
 connection_attempts = {}
-login_attempts = {}
-login_attempts_local = {}
-prev_output = ""
+ssh_login_attempts = {}
+ssh_login_attempts_local = {}
+http_login_attempts = {}
 
-ssh_failed_pattern = re.compile(b"ssh.*?Failed")
+ssh_failed_pattern = re.compile(r'Failed password for|authentication failure|Invalid user')
+http_failed_pattern = re.compile(r'401 Unauthorized')
 
+# this function apply procedures to the packet who sniff scapy
 
 def process_packet(packet):
 
     #port scan detection
+
     if packet.haslayer(IP):
         if packet.haslayer(TCP):
             src_ip = packet[IP].src
@@ -85,18 +88,31 @@ def process_packet(packet):
     # therefore, to understand how the SIEM works we also see a way to detect this on the local machine.
     # to this step i recommend setting the ssh_failed_pattern
 
-    if packet.haslayer(TCP) and packet[TCP].dport == 22 and packet.haslayer(Raw):
-        payload = packet[Raw].load
+    elif packet.haslayer(TCP) and packet[TCP].dport == 22 and packet.haslayer(Raw):
+        payload = packet[Raw].load.decode(errors='ignore')
         if ssh_failed_pattern.search(payload):
-            if src_ip not in login_attempts:
-                login_attempts[src_ip] = []
-            login_attempts[src_ip].append("try")
+            if src_ip not in ssh_login_attempts:
+                ssh_login_attempts[src_ip] = []
+            ssh_login_attempts[src_ip].append("try")
 
-            if len(login_attempts[src_ip]) > 5:
-                attempts = len(login_attempts[src_ip])
-                print(colored(f"Warning possible brute force attack from {src_ip}, amount of failed attempts: {attempts}", "red"))
+            if len(ssh_login_attempts[src_ip]) > 5:
+                attempts = len(ssh_login_attempts[src_ip])
+                print(colored(f"Warning possible brute force attack from {src_ip} to port 22, amount of failed attempts: {attempts}", "red"))
 
+    # brute force - HTTP login 
 
+    elif packet.haslayer(TCP) and packet[TCP].dport == 80 and packet.haslayer(Raw):
+        payload = packet[Raw].load.decode(errors='ignore')
+        if http_failed_pattern.search(payload):
+            if src_ip not in http_login_attempts:
+                http_login_attempts[src_ip] = []
+            http_login_attempts[src_ip].append("try")
+
+            if len(http_login_attempts[src_ip]) > 5:
+                attempts = len(http_login_attempts[src_ip])
+                print(colored(f"Warning possible brute force attack from {src_ip} to port 80, amount of failed attempts: {attempts}", "red"))
+
+# brute force - SSH login in local
 def check_failed_logins():
     global prev_output
     cmd = "journalctl _COMM=sshd | grep \"authentication failure\""
@@ -116,13 +132,13 @@ def check_failed_logins():
 
                     if ip:
                         ip_str = ip.group()
-                        if ip_str not in login_attempts_local:
-                            login_attempts_local[ip_str] = 0
+                        if ip_str not in ssh_login_attempts_local:
+                            ssh_login_attempts_local[ip_str] = 0
                         else:
-                            login_attempts_local[ip_str] += 1
+                            ssh_login_attempts_local[ip_str] += 1
 
-                    if login_attempts_local[ip_str] > 5:
-                        print(colored(f"Warning, failed SSH login attempts from IP: {ip_str} to localhost, amount of failed attempts : {login_attempts_local[ip_str]}", "red"))
+                    if ssh_login_attempts_local[ip_str] > 5:
+                        print(colored(f"Warning, failed SSH login attempts from IP: {ip_str} to localhost, amount of failed attempts: {ssh_login_attempts_local[ip_str]}", "red"))
                         print(f"{i}")
             time.sleep(3)
         except subprocess.CalledProcessError as e:
