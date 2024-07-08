@@ -2,6 +2,7 @@
 
 from termcolor import colored
 from scapy.all import sniff, TCP, UDP, IP, SCTP, Raw
+from collections import defaultdict
 import signal
 import sys
 import re
@@ -10,6 +11,7 @@ import subprocess
 import time
 import threading
 
+#ARREGLAR ARREGLAR ARREGLAR EXIT HAY QUE APRETAR DOS VECES CTRL C ARREGLAR ARREGLAR ARREGLAR ARREGLAR
 def def_handler(sig, frame):
     print(colored("\n\nExiting the program...", "yellow"))
     sys.exit(1)
@@ -51,16 +53,19 @@ connection_attempts = {}
 ssh_login_attempts = {}
 ssh_login_attempts_local = {}
 http_login_attempts = {}
+packet_counts = defaultdict(lambda: [0, 0])
 
-ssh_failed_pattern = re.compile(r'Failed password for|authentication failure|Invalid user')
+last_cleanup = 0
+THRESHOLD_PACKETS = 300
+TIME_WINDOW = 60
+
+ssh_failed_pattern = re.compile(r'Failed password for|authentication failure|Invalid user|authentication failed')
 http_failed_pattern = re.compile(r'401 Unauthorized')
 
-# this function apply procedures to the packet who sniff scapy
 
-def process_packet(packet):
+def port_scan(packet):
 
     #port scan detection
-
     if packet.haslayer(IP):
         if packet.haslayer(TCP):
             src_ip = packet[IP].src
@@ -80,27 +85,28 @@ def process_packet(packet):
 
         if len(set(connection_attempts[src_ip])) > 10:
             attempts = len(set(connection_attempts[src_ip]))
-            print(colored(f"Warning, possible scan of ports from, {src_ip}, amounts of attempts to connection: {attempts}", "red"))
+            print(colored(f"[!] Warning, possible scan of ports from, {src_ip}, amounts of attempts to connection: {attempts}", "red"))
 
+def brute_force(packet):
 
     # brute force - SSH login in red, in a few puntuals cases the traffic of the port 22 cant be detected,
     # this could be due to the firewall configuration, brute force tool configuration, iptables, etc
     # therefore, to understand how the SIEM works we also see a way to detect this on the local machine.
     # to this step i recommend setting the ssh_failed_pattern
+    if packet.haslayer(IP):
+        src_ip = packet[IP].src
+        if packet.haslayer(TCP) and packet[TCP].dport == 22 and packet.haslayer(Raw):
+            payload = packet[Raw].load.decode(errors='ignore')
+            if ssh_failed_pattern.search(payload) or packet[TCP].flags == 'R':
+                if src_ip not in ssh_login_attempts:
+                    ssh_login_attempts[src_ip] = []
+                ssh_login_attempts[src_ip].append("try")
 
-    elif packet.haslayer(TCP) and packet[TCP].dport == 22 and packet.haslayer(Raw):
-        payload = packet[Raw].load.decode(errors='ignore')
-        if ssh_failed_pattern.search(payload):
-            if src_ip not in ssh_login_attempts:
-                ssh_login_attempts[src_ip] = []
-            ssh_login_attempts[src_ip].append("try")
-
-            if len(ssh_login_attempts[src_ip]) > 5:
-                attempts = len(ssh_login_attempts[src_ip])
-                print(colored(f"Warning possible brute force attack from {src_ip} to port 22, amount of failed attempts: {attempts}", "red"))
+                if len(ssh_login_attempts[src_ip]) > 5:
+                    attempts = len(ssh_login_attempts[src_ip])
+                    print(colored(f"[!] Warning possible brute force attack from {src_ip} to port 22, amount of failed attempts: {attempts}", "blue"))
 
     # brute force - HTTP login 
-
     elif packet.haslayer(TCP) and packet[TCP].dport == 80 and packet.haslayer(Raw):
         payload = packet[Raw].load.decode(errors='ignore')
         if http_failed_pattern.search(payload):
@@ -110,10 +116,33 @@ def process_packet(packet):
 
             if len(http_login_attempts[src_ip]) > 5:
                 attempts = len(http_login_attempts[src_ip])
-                print(colored(f"Warning possible brute force attack from {src_ip} to port 80, amount of failed attempts: {attempts}", "red"))
+                print(colored(f"[!] Warning possible brute force attack from {src_ip} to port 80, amount of failed attempts: {attempts}", "blue"))
 
-# brute force - SSH login in local
+def detect_DoS(packet):
+
+    # detect DoS attacks
+    global last_cleanup
+    current_time = time.time()  
+
+    if packet.haslayer(IP):
+        ip_src = packet[IP].src
+        packet_counts[ip_src][0] += 1
+        packet_counts[ip_src][1] = current_time
+
+        if current_time - last_cleanup > 1:
+            last_cleanup = current_time
+            for ip in list(packet_counts.keys()):
+                if current_time - packet_counts[ip][1] > TIME_WINDOW:
+                    del packet_counts[ip]
+
+        # Its recommended to adjust the THRESHOLD_PACKETS to the needs of each network 
+        if packet_counts[ip_src][0] > THRESHOLD_PACKETS:
+            print(colored(f"[!] Warning possible DoS Attack from IP: {ip_src}", "yellow"))
+            packet_counts[ip_src] = [0, current_time]
+
 def check_failed_logins():
+
+    # brute force - SSH login in local
     global prev_output
     cmd = "journalctl _COMM=sshd | grep \"authentication failure\""
     ip_regex = re.compile(r'rhost=([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})')
@@ -138,26 +167,37 @@ def check_failed_logins():
                             ssh_login_attempts_local[ip_str] += 1
 
                     if ssh_login_attempts_local[ip_str] > 5:
-                        print(colored(f"Warning, failed SSH login attempts from IP: {ip_str} to localhost, amount of failed attempts: {ssh_login_attempts_local[ip_str]}", "red"))
+                        print(colored(f"[!] Warning, failed SSH login attempts from IP: {ip_str} to localhost, amount of failed attempts: {ssh_login_attempts_local[ip_str]}", "blue"))
                         print(f"{i}")
             time.sleep(3)
         except subprocess.CalledProcessError as e:
             print(f"{e}")
 
+def process_packets(iface):
+
+    login_thread = threading.Thread(target=check_failed_logins)
+    login_thread.start()
+
+    DoS_thread = threading.Thread(target=sniff, kwargs={"iface": iface, "prn": detect_DoS, "store": False})
+    DoS_thread.start()
+
+    bForce_thread = threading.Thread(target=sniff, kwargs={"iface": iface, "prn": brute_force, "store": False})
+    bForce_thread.start()
+
+    port_thread = threading.Thread(target=sniff, kwargs={"iface": iface, "prn": port_scan, "store": False})
+    port_thread.start()
+
+    login_thread.join()
+    DoS_thread.join()
+    bForce_thread.join()
+    port_thread.join()
 
 def main():
     banner()
     iface = input("Enter the interface to monitor: ")
     print(colored(f"\nInitializing monitoring of interface: {iface}", "cyan"))
+    process_packets(iface)
 
-    login_thread = threading.Thread(target=check_failed_logins)
-    login_thread.start()
-
-    sniff_thread = threading.Thread(target=sniff, kwargs={"iface": iface, "prn": process_packet, "store": False})
-    sniff_thread.start()
-
-    login_thread.join()
-    sniff_thread.join()
 
 if __name__ == '__main__':
     main()
