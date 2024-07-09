@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 
 from termcolor import colored
-from scapy.all import sniff, TCP, UDP, IP, SCTP, Raw
+from scapy.all import sniff, TCP, UDP, IP, SCTP, Raw, ARP
 from collections import defaultdict
 import signal
 import sys
+import os
 import re
 import logging
 import subprocess
 import time
 import threading
 
-#ARREGLAR ARREGLAR ARREGLAR EXIT HAY QUE APRETAR DOS VECES CTRL C ARREGLAR ARREGLAR ARREGLAR ARREGLAR
 def def_handler(sig, frame):
     print(colored("\n\nExiting the program...", "yellow"))
-    sys.exit(1)
+    os._exit(1)
 
 signal.signal(signal.SIGINT, def_handler)
+
 
 def banner():
     print(colored("\t\t\t\t\t\t\t    +[+[+[ Intrusion Detection System ]+]+]+", "magenta"))
@@ -62,6 +63,14 @@ TIME_WINDOW = 60
 ssh_failed_pattern = re.compile(r'Failed password for|authentication failure|Invalid user|authentication failed')
 http_failed_pattern = re.compile(r'401 Unauthorized')
 
+def load_arp_table_from_file(file_path):
+    arp_table = {}
+
+    with open(file_path, 'r') as f:
+        for line in f:
+            ip, mac = line.strip().split(',')
+            arp_table[ip] = mac
+    return arp_table
 
 def port_scan(packet):
 
@@ -140,10 +149,28 @@ def detect_DoS(packet):
             print(colored(f"[!] Warning possible DoS Attack from IP: {ip_src}", "yellow"))
             packet_counts[ip_src] = [0, current_time]
 
+def detect_arp_spoof(packet, arp_table):
+
+    # detect ARP Spoofing, to detect this you must need a file (arp_table.txt) with the directions IP and MAC Address of all the endpoints in the network
+    # Example format file:
+    # 190.0.0.0,00:00:00:00:00:00
+    # 190.0.0.1,11:11:11:11:11:11
+    # 190.0.0.2,22:22:22:22:22:22
+    if ARP in packet and packet[ARP].op == 2:
+        ip = packet[ARP].psrc
+        mac = packet[ARP].hwsrc
+
+        if ip in arp_table:
+            if arp_table[ip] != mac:
+                print(colored(f"[!] Warning possible ARP spoofing attack detected to IP: {ip}, actually MAC: {mac}, registered MAC: {arp_table[ip]}", "magenta"))
+
+def sniff_arp_packets(arp_table):
+
+    sniff(filter="arp", prn=lambda packet: detect_arp_spoof(packet, arp_table), store=0)
+
 def check_failed_logins():
 
     # brute force - SSH login in local
-    global prev_output
     cmd = "journalctl _COMM=sshd | grep \"authentication failure\""
     ip_regex = re.compile(r'rhost=([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})')
 
@@ -167,13 +194,14 @@ def check_failed_logins():
                             ssh_login_attempts_local[ip_str] += 1
 
                     if ssh_login_attempts_local[ip_str] > 5:
-                        print(colored(f"[!] Warning, failed SSH login attempts from IP: {ip_str} to localhost, amount of failed attempts: {ssh_login_attempts_local[ip_str]}", "blue"))
+                        print(colored(f"[!] Warning, failed SSH login attempts for IP: {ip_str} to localhost, amount of failed attempts: {ssh_login_attempts_local[ip_str]}", "blue"))
                         print(f"{i}")
+            result = new_result
             time.sleep(3)
         except subprocess.CalledProcessError as e:
             print(f"{e}")
 
-def process_packets(iface):
+def process_packets(iface, arp_table):
 
     login_thread = threading.Thread(target=check_failed_logins)
     login_thread.start()
@@ -187,6 +215,10 @@ def process_packets(iface):
     port_thread = threading.Thread(target=sniff, kwargs={"iface": iface, "prn": port_scan, "store": False})
     port_thread.start()
 
+    spoof_thread = threading.Thread(target=sniff_arp_packets, args=(arp_table,))
+    spoof_thread.start()
+
+    spoof_thread.join()
     login_thread.join()
     DoS_thread.join()
     bForce_thread.join()
@@ -196,7 +228,8 @@ def main():
     banner()
     iface = input("Enter the interface to monitor: ")
     print(colored(f"\nInitializing monitoring of interface: {iface}", "cyan"))
-    process_packets(iface)
+    arp_table = load_arp_table_from_file("arp_table.txt")
+    process_packets(iface, arp_table)
 
 
 if __name__ == '__main__':
