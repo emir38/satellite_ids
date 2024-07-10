@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 
 from termcolor import colored
-from scapy.all import sniff, TCP, UDP, IP, SCTP, Raw, ARP
-from collections import defaultdict
+from scapy.all import *
 import signal
 import sys
 import os
@@ -12,12 +11,12 @@ import subprocess
 import time
 import threading
 
+
 def def_handler(sig, frame):
     print(colored("\n\nExiting the program...", "yellow"))
     os._exit(1)
 
 signal.signal(signal.SIGINT, def_handler)
-
 
 def banner():
     print(colored("\t\t\t\t\t\t\t    +[+[+[ Intrusion Detection System ]+]+]+", "magenta"))
@@ -50,6 +49,7 @@ def banner():
              `.   __,\'\"
                `'\n\n""", "blue"))
 
+
 connection_attempts = {}
 ssh_login_attempts = {}
 ssh_login_attempts_local = {}
@@ -62,6 +62,26 @@ TIME_WINDOW = 60
 
 ssh_failed_pattern = re.compile(r'Failed password for|authentication failure|Invalid user|authentication failed')
 http_failed_pattern = re.compile(r'401 Unauthorized')
+
+known_c2_domains = [
+    "www.youtube.com",
+    "malicious-domain.com",
+    "another-malicious-domain.org"
+]
+
+known_c2_ips = [
+    "192.168.1.100",
+    "192.168.100.1"
+]
+
+def enable_promiscuous_mode(interface):
+
+    #enable promiscuous mode
+    try:
+        subprocess.run(["ip", "link", "set", interface, "promisc", "on"])
+        print(f"Promiscuous mode enable")
+    except Exception as e:
+        print("e")
 
 def load_arp_table_from_file(file_path):
     arp_table = {}
@@ -116,7 +136,7 @@ def brute_force(packet):
                     print(colored(f"[!] Warning possible brute force attack from {src_ip} to port 22, amount of failed attempts: {attempts}", "blue"))
 
     # brute force - HTTP login 
-    elif packet.haslayer(TCP) and packet[TCP].dport == 80 and packet.haslayer(Raw):
+    if packet.haslayer(TCP) and packet[TCP].dport == 80 and packet.haslayer(Raw):
         payload = packet[Raw].load.decode(errors='ignore')
         if http_failed_pattern.search(payload):
             if src_ip not in http_login_attempts:
@@ -148,6 +168,24 @@ def detect_DoS(packet):
         if packet_counts[ip_src][0] > THRESHOLD_PACKETS:
             print(colored(f"[!] Warning possible DoS Attack from IP: {ip_src}", "yellow"))
             packet_counts[ip_src] = [0, current_time]
+
+def detect_c2(packet):
+
+    # detect possible C2 attack
+    # for good performance you should need configure known_c2_ips and known_c2_domains with known ips and domains as potential C2
+    # you can also use API services that contain dangerous IP records and domains, for example: VirusTotal
+    if packet.haslayer(IP):
+       ip_dst = packet[IP].dst
+       if ip_dst in known_c2_ips:
+           print(colored(f"[!] Warning suspect traffic [C2] to ip: {ip_dst}", "cyan"))
+
+    if packet.haslayer(DNS):
+        if packet.haslayer(DNSQR):
+            for i in range(packet[DNS].qdcount):
+                dns_qr = packet[DNSQR][i]
+                domain_name = dns_qr.qname.decode('utf-8').rstrip('.')
+                if domain_name in known_c2_domains:
+                    print(colored(f"[!] Warning suspect traffic [C2] to domain: {domain_name}", "cyan"))
 
 def detect_arp_spoof(packet, arp_table):
 
@@ -215,6 +253,9 @@ def process_packets(iface, arp_table):
     port_thread = threading.Thread(target=sniff, kwargs={"iface": iface, "prn": port_scan, "store": False})
     port_thread.start()
 
+    c2_thread = threading.Thread(target=sniff, kwargs={"iface": iface, "prn": detect_c2, "store": False, "filter":"udp port 53"})
+    c2_thread.start()
+
     spoof_thread = threading.Thread(target=sniff_arp_packets, args=(arp_table,))
     spoof_thread.start()
 
@@ -223,11 +264,13 @@ def process_packets(iface, arp_table):
     DoS_thread.join()
     bForce_thread.join()
     port_thread.join()
+    c2_thread.join()
 
 def main():
     banner()
     iface = input("Enter the interface to monitor: ")
     print(colored(f"\nInitializing monitoring of interface: {iface}", "cyan"))
+    enable_promiscuous_mode(iface)
     arp_table = load_arp_table_from_file("arp_table.txt")
     process_packets(iface, arp_table)
 
