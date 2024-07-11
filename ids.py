@@ -74,6 +74,15 @@ known_c2_ips = [
     "192.168.100.1"
 ]
 
+#Its recommended configure a whitelist to ignore traffic from secure IPs on your network
+whitelist = [
+    "10.0.0.0",
+    "11.0.0.0"
+]
+
+def is_whitelisted(ip):
+    return ip in whitelist
+
 def enable_promiscuous_mode(interface):
 
     #enable promiscuous mode
@@ -107,6 +116,12 @@ def port_scan(packet):
             dst_port = packet[SCTP].dport
         else:
             return
+
+        try:
+            if is_whitelisted(packet[IP].src):
+                return
+        except Exception as e:
+            print(f"{e}")
 
         if src_ip not in connection_attempts:
             connection_attempts[src_ip] = []
@@ -157,6 +172,12 @@ def detect_DoS(packet):
         ip_src = packet[IP].src
         packet_counts[ip_src][0] += 1
         packet_counts[ip_src][1] = current_time
+
+        try:
+            if is_whitelisted(packet[IP].src):
+                return
+        except Exception as e:
+            print(f"{e}")
 
         if current_time - last_cleanup > 1:
             last_cleanup = current_time
