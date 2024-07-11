@@ -1,4 +1,25 @@
 #!/usr/bin/env python3
+#-------------------------
+# Satellite IDS 
+# Author: emir38
+# Year: 2024
+# Version: in the works!
+#-------------------------
+
+#--------------------------------------------------------------------------------------------------------------------------------
+# Satellite is currently a monitor to detect man-in-the-middle attacks, DoS, brute force (SSH - HTTP), possible Command and Control, and also
+# network port scans. This tool is used mainly for educational purposes in the practitioner's local network, in order to obtain knowledge of how
+# these attacks work behind the scenes and learn how to filter for them.
+#--------------------------------------------------------------------------------------------------------------------------------
+
+#--------------------------------------------------------------------------------------------------------------------------------
+#                    GNU GENERAL PUBLIC LICENSE
+#                      Version 3, 29 June 2007
+
+# Copyright (C) 2007 Free Software Foundation, Inc. <http://fsf.org/>
+# Everyone is permitted to copy and distribute verbatim copies
+# of this license document, but changing it is not allowed.
+#--------------------------------------------------------------------------------------------------------------------------------
 
 from termcolor import colored
 from scapy.all import *
@@ -6,7 +27,6 @@ import signal
 import sys
 import os
 import re
-import logging
 import subprocess
 import time
 import threading
@@ -63,12 +83,14 @@ TIME_WINDOW = 60
 ssh_failed_pattern = re.compile(r'Failed password for|authentication failure|Invalid user|authentication failed')
 http_failed_pattern = re.compile(r'401 Unauthorized')
 
+#configure known_c2_domains to your neededs
 known_c2_domains = [
     "www.youtube.com",
     "malicious-domain.com",
     "another-malicious-domain.org"
 ]
 
+#confifure known_c2_ips to your neededs
 known_c2_ips = [
     "192.168.1.100",
     "192.168.100.1"
