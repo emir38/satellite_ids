@@ -225,7 +225,7 @@ def detect_c2(packet):
     if packet.haslayer(DNS):
         if packet.haslayer(DNSQR):
             for i in range(packet[DNS].qdcount):
-                dns_qr = packet[DNSQR][i]
+                dns_qr = packet[DNSQR].qd[i]
                 domain_name = dns_qr.qname.decode('utf-8').rstrip('.')
                 if domain_name in known_c2_domains:
                     print(colored(f"[!] Warning suspect traffic [C2] to domain: {domain_name}", "cyan"))
